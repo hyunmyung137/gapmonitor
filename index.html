@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SKHY/SKHX 밴드 모니터</title>
+<style>
+  :root{--bg:#0b0e13;--panel:#12161e;--border:#232b3a;--txt:#d7dee9;--dim:#9aa5b8;
+        --gold:#f5b942;--blue:#5aa7ff;--green:#2fd27f;--red:#ff5d6c;--purple:#c9a0ff;--pink:#ff8fa3;}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+       padding:12px;font-size:14px;-webkit-font-smoothing:antialiased}
+  .hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+  .hdr h1{font-size:15px;font-weight:600;color:var(--txt)}
+  .hdr .upd{font-size:11px;color:var(--dim)}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:10px 12px}
+  .card .lbl{font-size:11px;color:var(--dim);margin-bottom:3px}
+  .card .val{font-size:20px;font-weight:600}
+  .card .sub{font-size:11px;color:var(--dim);margin-top:2px}
+  .full{grid-column:1/3}
+  canvas{width:100%;display:block;background:var(--bg);border:1px solid var(--border);border-radius:10px}
+  .zone{display:inline-block;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:600}
+  .z-up{background:rgba(255,93,108,.15);color:var(--red)}
+  .z-dn{background:rgba(47,210,127,.15);color:var(--green)}
+  .z-mid{background:rgba(90,167,255,.15);color:var(--blue)}
+  .z-dead{background:rgba(154,165,184,.15);color:var(--dim)}
+  .pos{font-variant-numeric:tabular-nums}
+  .g{color:var(--green)}.r{color:var(--red)}.d{color:var(--dim)}
+  .err{background:rgba(255,93,108,.1);border:1px solid var(--red);color:var(--red);padding:8px;border-radius:8px;font-size:12px;margin-bottom:10px;display:none}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  td{padding:4px 0;border-bottom:1px solid var(--border)}
+  td:last-child{text-align:right;font-variant-numeric:tabular-nums}
+  .mini{font-size:11px;color:var(--dim)}
+</style>
+</head>
+<body>
+<div class="hdr">
+  <h1>🎯 SKHY/SKHX 밴드 모니터</h1>
+  <span class="upd" id="upd">로딩…</span>
+</div>
+<div class="err" id="err"></div>
+
+<div class="grid">
+  <div class="card"><div class="lbl">%괴리</div><div class="val" id="pgap">–</div><div class="sub" id="zsub">–</div></div>
+  <div class="card"><div class="lbl">달러갭</div><div class="val" id="dgap">–</div><div class="sub" id="dgsub">–</div></div>
+</div>
+
+<canvas id="chart" height="640"></canvas>
+
+<div class="card full" style="margin-top:10px">
+  <div class="lbl" style="margin-bottom:6px">포지션 / 밴드</div>
+  <table id="postbl"><tbody></tbody></table>
+</div>
+
+<script>
+const DEX="xyz", COINX="SKHX", COINY="SKHY";
+const WIN=96, SIGFLOOR=0.010, ENTRY_Z=1.0, STOP_Z=3.0;
+const BACKSTOP_DGAP=505, ENTRY_DGAP_REF=465;
+const WALLET="0x5cF6e510E0C123E1e839376F8Ea1900Bb9B9A6C1";
+const REENTRY_BASE=147900;
+
+async function api(body){
+  const r=await fetch("https://api.hyperliquid.xyz/info",{method:"POST",
+    headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  if(!r.ok) throw new Error("API "+r.status);
+  return r.json();
+}
+const fmt=(n,d=0)=>n==null?"–":n.toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d});
+const sgn=(n,d=0)=>(n>=0?"+":"")+fmt(n,d);
+
+function rolling(logs){
+  // returns arrays of mu, sigma(effective), z for each index (null before WIN)
+  const mu=[],sd=[],z=[];
+  for(let i=0;i<logs.length;i++){
+    if(i<WIN){mu.push(null);sd.push(null);z.push(null);continue;}
+    const w=logs.slice(i-WIN,i);
+    const m=w.reduce((a,b)=>a+b,0)/w.length;
+    const v=w.reduce((a,b)=>a+(b-m)*(b-m),0)/w.length;
+    const s=Math.sqrt(v);
+    mu.push(m);sd.push(s);
+    z.push(s>0?(logs[i]-m)/s:0);
+  }
+  return {mu,sd,z};
+}
+const toPct=lv=>(Math.exp(lv)-1)*100;
+
+async function load(){
+  try{
+    document.getElementById("err").style.display="none";
+    const now=Date.now();
+    const start=now-9*86400000;
+    const [cx,cy]=await Promise.all([
+      api({type:"candleSnapshot",req:{coin:DEX+":"+COINX,interval:"15m",startTime:start,endTime:now}}),
+      api({type:"candleSnapshot",req:{coin:DEX+":"+COINY,interval:"15m",startTime:start,endTime:now}})
+    ]);
+    const mx={},my={};
+    cx.forEach(k=>mx[k.t]=parseFloat(k.c));
+    cy.forEach(k=>my[k.t]=parseFloat(k.c));
+    const ts=Object.keys(mx).filter(t=>my[t]).map(Number).sort((a,b)=>a-b);
+    const rows=ts.map(t=>({t,x:mx[t],y:my[t]}));
+    const logs=rows.map(r=>Math.log(10*r.y/r.x));
+    const {mu,sd,z}=rolling(logs);
+
+    // 현재값
+    const last=rows.length-1;
+    const px=rows[last].x, py=rows[last].y;
+    const pgap=(10*py-px)/px*100;
+    const dgap=10*py-px;
+    const curZ=z[last], curSd=sd[last];
+    const dead=curSd<SIGFLOOR;
+    const muPct=toPct(mu[last]);
+    const seff=Math.max(curSd,SIGFLOOR);
+    const u1=toPct(mu[last]+seff), l1=toPct(mu[last]-seff), u3=toPct(mu[last]+3*seff);
+
+    // 헤더 카드
+    document.getElementById("pgap").textContent=pgap.toFixed(2)+"%";
+    let zone,zoneCls;
+    if(dead){zone="죽은장 (거래중단)";zoneCls="z-dead";}
+    else if(curZ>=ENTRY_Z){zone="🔼 상단 이탈";zoneCls="z-up";}
+    else if(curZ<=-ENTRY_Z){zone="🔽 하단 이탈";zoneCls="z-dn";}
+    else {zone="중립";zoneCls="z-mid";}
+    document.getElementById("zsub").innerHTML=
+      `z <span class="${zoneCls}" style="padding:1px 6px">${curZ==null?"–":(curZ>=0?"+":"")+curZ.toFixed(2)+"σ"}</span> `+
+      `<span class="zone ${zoneCls}">${zone}</span>`;
+    document.getElementById("dgap").textContent="$"+fmt(dgap);
+    document.getElementById("dgsub").innerHTML=
+      `진입 $${ENTRY_DGAP_REF} → <span class="${dgap-ENTRY_DGAP_REF<0?'g':'r'}">${sgn(dgap-ENTRY_DGAP_REF)}</span> · 백스톱 $${BACKSTOP_DGAP} 여유 $${fmt(BACKSTOP_DGAP-dgap)}`;
+
+    drawChart(rows,logs,mu,sd,z);
+    await loadPos(px,py,pgap,dgap,curZ,dead,u1,muPct,u3);
+
+    const d=new Date();
+    document.getElementById("upd").textContent="갱신 "+d.toLocaleTimeString("ko-KR",{hour12:false})+" · 1분마다";
+  }catch(e){
+    const el=document.getElementById("err");
+    el.style.display="block";
+    el.textContent="⚠ 데이터 로드 실패: "+e.message+" (재시도 대기)";
+  }
+}
+
+async function loadPos(px,py,pgap,dgap,curZ,dead,u1,muPct,u3){
+  const tb=document.querySelector("#postbl tbody");
+  try{
+    const st=await api({type:"clearinghouseState",user:WALLET,dex:DEX});
+    const sp=await api({type:"spotClearinghouseState",user:WALLET});
+    const perpAcct=parseFloat(st.marginSummary.accountValue);
+    let spotUsdc=0;
+    (sp.balances||[]).forEach(b=>{if(b.coin==="USDC")spotUsdc=parseFloat(b.total);});
+    const pos={};
+    (st.assetPositions||[]).forEach(p=>{pos[p.position.coin.replace(DEX+":","")]=p.position;});
+    const X=pos[COINX], Y=pos[COINY];
+    let rows_html="";
+    if(X&&Y){
+      const qx=Math.abs(parseFloat(X.szi)), qy=Math.abs(parseFloat(Y.szi));
+      const upnl=parseFloat(X.unrealizedPnl)+parseFloat(Y.unrealizedPnl);
+      const ratio=qy/qx;
+      rows_html+=`<tr><td>SKHX 롱 / SKHY 숏</td><td class="pos">${qx.toFixed(1)} / ${qy.toFixed(0)}주 ${Math.abs(ratio-10)<0.3?'<span class="g">✓1:10</span>':'<span class="r">⚠비율</span>'}</td></tr>`;
+      rows_html+=`<tr><td>미실현</td><td class="pos ${upnl>=0?'g':'r'}">${sgn(upnl)}</td></tr>`;
+      rows_html+=`<tr><td class="d">현재 보유 / 바닥</td><td class="pos d">${qx.toFixed(0)}주 / 140주</td></tr>`;
+    } else {
+      rows_html+=`<tr><td class="d">포지션</td><td class="pos d">없음 (플랫)</td></tr>`;
+    }
+    // 재진입 트리거
+    let trig;
+    if(dead) trig=`<span class="z-dead zone">대기</span> σ 죽음 — 신호 무시`;
+    else if(curZ>=ENTRY_Z) trig=`<span class="z-up zone">✅ 상단 +1σ 이탈</span> 재진입/증액 후보`;
+    else trig=`<span class="z-mid zone">대기</span> +1σ(${u1.toFixed(1)}%) 이탈 시 재진입`;
+    rows_html+=`<tr><td>재진입 트리거</td><td>${trig}</td></tr>`;
+    rows_html+=`<tr><td class="d">총자산(perp+spot)</td><td class="pos d">$${fmt(perpAcct)} + $${fmt(spotUsdc)} <span class="mini">(통합계좌: 단순합산 주의)</span></td></tr>`;
+    rows_html+=`<tr><td class="d">밴드 μ / +1σ / +3σ</td><td class="pos d">${muPct.toFixed(1)}% / ${u1.toFixed(1)}% / ${u3.toFixed(1)}%</td></tr>`;
+    tb.innerHTML=rows_html;
+  }catch(e){
+    tb.innerHTML=`<tr><td class="d">포지션 로드 실패</td><td class="pos r">${e.message}</td></tr>`;
+  }
+}
+
+function drawChart(rows,logs,mu,sd,z){
+  const cv=document.getElementById("chart");
+  const dpr=window.devicePixelRatio||1;
+  const W=cv.clientWidth, H=640;
+  cv.width=W*dpr; cv.height=H*dpr;
+  const ctx=cv.getContext("2d"); ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,W,H);
+
+  // 워밍업 이후만
+  const s=WIN;
+  const N=rows.length;
+  const xAt=i=>40+(W-50)*(i-s)/(N-1-s);
+
+  // 4 패널 높이 배분
+  const pads={t:8,b:22};
+  const heights=[H*0.42,H*0.16,H*0.20,H*0.20];
+  const tops=[0]; for(let k=1;k<4;k++)tops.push(tops[k-1]+heights[k-1]);
+
+  const colors={gold:"#f5b942",blue:"#5aa7ff",green:"#2fd27f",red:"#ff5d6c",purple:"#c9a0ff",grid:"#1a1f2b",dim:"#9aa5b8"};
+
+  function panel(top,h,series,opts){
+    const yb=top+pads.t, yh=h-pads.t-pads.b;
+    let lo=Math.min(...series.flatMap(s=>s.data.filter(v=>v!=null)));
+    let hi=Math.max(...series.flatMap(s=>s.data.filter(v=>v!=null)));
+    if(opts.lo!=null)lo=Math.min(lo,opts.lo); if(opts.hi!=null)hi=Math.max(hi,opts.hi);
+    const pad=(hi-lo)*0.1||1; lo-=pad; hi+=pad;
+    const yAt=v=>yb+yh*(1-(v-lo)/(hi-lo));
+    // grid + label
+    ctx.strokeStyle=colors.grid; ctx.fillStyle=colors.dim; ctx.font="9px sans-serif"; ctx.lineWidth=0.5;
+    for(let g=0;g<=3;g++){const vv=lo+(hi-lo)*g/3; const yy=yAt(vv);
+      ctx.beginPath();ctx.moveTo(40,yy);ctx.lineTo(W-10,yy);ctx.stroke();
+      ctx.fillText(opts.fmt?opts.fmt(vv):vv.toFixed(1),2,yy+3);}
+    // hlines
+    (opts.hlines||[]).forEach(hl=>{const yy=yAt(hl.v);ctx.strokeStyle=hl.c;ctx.lineWidth=hl.w||0.8;
+      ctx.setLineDash(hl.dash||[4,3]);ctx.beginPath();ctx.moveTo(40,yy);ctx.lineTo(W-10,yy);ctx.stroke();ctx.setLineDash([]);
+      if(hl.label){ctx.fillStyle=hl.c;ctx.font="8px sans-serif";ctx.fillText(hl.label,42,yy-2);}});
+    // series
+    series.forEach(se=>{
+      ctx.strokeStyle=se.c; ctx.lineWidth=se.w||1.4; ctx.setLineDash(se.dash||[]);
+      ctx.beginPath(); let started=false;
+      for(let i=s;i<N;i++){const v=se.data[i]; if(v==null){started=false;continue;}
+        const xx=xAt(i),yy=yAt(v); if(!started){ctx.moveTo(xx,yy);started=true;}else ctx.lineTo(xx,yy);}
+      ctx.stroke(); ctx.setLineDash([]);
+      // last point dot
+      if(se.dot){const v=se.data[N-1]; if(v!=null){ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(xAt(N-1),yAt(v),3,0,7);ctx.fill();}}
+    });
+    return yAt;
+  }
+
+  // 패널1: %괴리 + 밴드
+  const pg=logs.map(toPct);
+  const muP=mu.map(v=>v==null?null:toPct(v));
+  const u1=mu.map((v,i)=>v==null?null:toPct(v+Math.max(sd[i],SIGFLOOR)));
+  const l1=mu.map((v,i)=>v==null?null:toPct(v-Math.max(sd[i],SIGFLOOR)));
+  const u3=mu.map((v,i)=>v==null?null:toPct(v+3*Math.max(sd[i],SIGFLOOR)));
+  panel(tops[0],heights[0],[
+    {data:pg,c:colors.gold,w:1.6,dot:true},
+    {data:muP,c:colors.blue,w:1},
+    {data:u1,c:colors.red,w:0.9,dash:[4,3]},
+    {data:l1,c:colors.green,w:0.9,dash:[4,3]},
+    {data:u3,c:colors.red,w:0.7,dash:[2,3]},
+  ],{fmt:v=>v.toFixed(0)+"%"});
+  ctx.fillStyle=colors.dim;ctx.font="10px sans-serif";ctx.fillText("%괴리 + 밴드",44,tops[0]+12);
+
+  // 패널2: Z
+  panel(tops[1],heights[1],[{data:z,c:colors.purple,w:1.3,dot:true}],
+    {lo:-3.5,hi:3.5,fmt:v=>v.toFixed(0),hlines:[
+      {v:0,c:colors.blue,w:0.6,dash:[]},{v:1,c:colors.red,w:0.6},{v:-1,c:colors.green,w:0.6},{v:3,c:colors.red,w:0.5,dash:[2,3]}]});
+  ctx.fillStyle=colors.dim;ctx.font="10px sans-serif";ctx.fillText("Z-스코어",44,tops[1]+12);
+
+  // 패널3: σ
+  panel(tops[2],heights[2],[{data:sd,c:colors.gold,w:1.3,dot:true}],
+    {lo:0,fmt:v=>v.toFixed(3),hlines:[{v:SIGFLOOR,c:colors.red,w:0.8,label:"하한 0.010"}]});
+  ctx.fillStyle=colors.dim;ctx.font="10px sans-serif";ctx.fillText("σ (변동성)",44,tops[2]+12);
+
+  // 패널4: 달러갭
+  const dg=rows.map(r=>10*r.y-r.x);
+  panel(tops[3],heights[3],[{data:dg,c:colors.gold,w:1.4,dot:true}],
+    {hi:BACKSTOP_DGAP,fmt:v=>"$"+v.toFixed(0),hlines:[{v:BACKSTOP_DGAP,c:colors.red,w:1,label:"백스톱 $505"}]});
+  ctx.fillStyle=colors.dim;ctx.font="10px sans-serif";ctx.fillText("달러갭",44,tops[3]+12);
+}
+
+load();
+setInterval(load,60000);
+</script>
+</body>
+</html>
