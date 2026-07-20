@@ -19,7 +19,12 @@
   .card .val{font-size:20px;font-weight:600}
   .card .sub{font-size:11px;color:var(--dim);margin-top:2px}
   .full{grid-column:1/3}
-  canvas{width:100%;display:block;background:var(--bg);border:1px solid var(--border);border-radius:10px}
+  canvas{width:100%;display:block;background:var(--bg);border:1px solid var(--border);border-radius:10px;cursor:crosshair}
+  #tip{position:fixed;pointer-events:none;z-index:20;display:none;background:rgba(10,13,18,.96);border:1px solid var(--border);
+       border-radius:8px;padding:6px 9px;font-size:11px;line-height:1.55;color:var(--txt);box-shadow:0 6px 18px rgba(0,0,0,.55);
+       font-variant-numeric:tabular-nums;white-space:nowrap}
+  #tip .th{color:var(--dim);margin-bottom:3px}
+  #tip b{color:var(--dim);font-weight:400;display:inline-block;min-width:52px}
   .zone{display:inline-block;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:600}
   .z-up{background:rgba(255,93,108,.15);color:var(--red)}
   .z-dn{background:rgba(47,210,127,.15);color:var(--green)}
@@ -40,6 +45,7 @@
   <span class="upd" id="upd">로딩…</span>
 </div>
 <div class="err" id="err"></div>
+<div id="tip"></div>
 
 <div class="grid">
   <div class="card"><div class="lbl">%괴리</div><div class="val" id="pgap">–</div><div class="sub" id="zsub">–</div></div>
@@ -59,6 +65,7 @@ const WIN=96, SIGFLOOR=0.010, ENTRY_Z=1.0, STOP_Z=3.0;
 const BACKSTOP_DGAP=505, ENTRY_DGAP_REF=465;
 const WALLET="0x5cF6e510E0C123E1e839376F8Ea1900Bb9B9A6C1";
 const REENTRY_BASE=147900;
+let CHART=null, LAST=null;
 
 async function api(body){
   const r=await fetch("https://api.hyperliquid.xyz/info",{method:"POST",
@@ -230,7 +237,7 @@ function drawChart(rows,logs,mu,sd,z){
   const u1=mu.map((v,i)=>v==null?null:toPct(v+Math.max(sd[i],SIGFLOOR)));
   const l1=mu.map((v,i)=>v==null?null:toPct(v-Math.max(sd[i],SIGFLOOR)));
   const u3=mu.map((v,i)=>v==null?null:toPct(v+3*Math.max(sd[i],SIGFLOOR)));
-  panel(tops[0],heights[0],[
+  const yAt1=panel(tops[0],heights[0],[
     {data:pg,c:colors.gold,w:1.6,dot:true},
     {data:muP,c:colors.blue,w:1},
     {data:u1,c:colors.red,w:0.9,dash:[4,3]},
@@ -240,22 +247,96 @@ function drawChart(rows,logs,mu,sd,z){
   ctx.fillStyle=colors.dim;ctx.font="10px sans-serif";ctx.fillText("%괴리 + 밴드",44,tops[0]+12);
 
   // 패널2: Z
-  panel(tops[1],heights[1],[{data:z,c:colors.purple,w:1.3,dot:true}],
+  const yAt2=panel(tops[1],heights[1],[{data:z,c:colors.purple,w:1.3,dot:true}],
     {lo:-3.5,hi:3.5,fmt:v=>v.toFixed(0),hlines:[
       {v:0,c:colors.blue,w:0.6,dash:[]},{v:1,c:colors.red,w:0.6},{v:-1,c:colors.green,w:0.6},{v:3,c:colors.red,w:0.5,dash:[2,3]}]});
   ctx.fillStyle=colors.dim;ctx.font="10px sans-serif";ctx.fillText("Z-스코어",44,tops[1]+12);
 
   // 패널3: σ
-  panel(tops[2],heights[2],[{data:sd,c:colors.gold,w:1.3,dot:true}],
+  const yAt3=panel(tops[2],heights[2],[{data:sd,c:colors.gold,w:1.3,dot:true}],
     {lo:0,fmt:v=>v.toFixed(3),hlines:[{v:SIGFLOOR,c:colors.red,w:0.8,label:"하한 0.010"}]});
   ctx.fillStyle=colors.dim;ctx.font="10px sans-serif";ctx.fillText("σ (변동성)",44,tops[2]+12);
 
   // 패널4: 달러갭
   const dg=rows.map(r=>10*r.y-r.x);
-  panel(tops[3],heights[3],[{data:dg,c:colors.gold,w:1.4,dot:true}],
+  const yAt4=panel(tops[3],heights[3],[{data:dg,c:colors.gold,w:1.4,dot:true}],
     {hi:BACKSTOP_DGAP,fmt:v=>"$"+v.toFixed(0),hlines:[{v:BACKSTOP_DGAP,c:colors.red,w:1,label:"백스톱 $505"}]});
   ctx.fillStyle=colors.dim;ctx.font="10px sans-serif";ctx.fillText("달러갭",44,tops[3]+12);
+
+  // hover 지원용 지오메트리/데이터 저장
+  LAST={rows,logs,mu,sd,z};
+  CHART={rows,s,N,W,H,ctx,xAt,
+    panels:[
+      {yAt:yAt1,dots:[{d:pg,c:colors.gold},{d:muP,c:colors.blue},{d:u1,c:colors.red},{d:l1,c:colors.green},{d:u3,c:colors.red}]},
+      {yAt:yAt2,dots:[{d:z,c:colors.purple}]},
+      {yAt:yAt3,dots:[{d:sd,c:colors.gold}]},
+      {yAt:yAt4,dots:[{d:dg,c:colors.gold}]},
+    ],
+    vals:{pg,muP,u1,l1,u3,z,sd,dg}
+  };
 }
+
+function redrawBase(){ if(LAST) drawChart(LAST.rows,LAST.logs,LAST.mu,LAST.sd,LAST.z); }
+
+function drawCross(i){
+  if(!CHART) return;
+  const ctx=CHART.ctx, x=CHART.xAt(i);
+  ctx.save();
+  ctx.strokeStyle="rgba(255,255,255,.30)"; ctx.lineWidth=1; ctx.setLineDash([3,3]);
+  ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,CHART.H); ctx.stroke(); ctx.setLineDash([]);
+  CHART.panels.forEach(p=>p.dots.forEach(se=>{
+    const v=se.d[i]; if(v==null) return;
+    const y=p.yAt(v);
+    ctx.beginPath(); ctx.arc(x,y,3.2,0,7); ctx.fillStyle=se.c; ctx.fill();
+    ctx.lineWidth=1; ctx.strokeStyle="#0b0e13"; ctx.stroke();
+  }));
+  ctx.restore();
+}
+
+function showTip(i,cx,cy){
+  if(!CHART) return;
+  const v=CHART.vals, f=(x,d=2)=>x==null?"–":x.toFixed(d);
+  const d=new Date(CHART.rows[i].t);
+  const when=d.toLocaleString("ko-KR",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false});
+  const zt=v.z[i]==null?"–":(v.z[i]>=0?"+":"")+f(v.z[i],2)+"σ";
+  const dgt=v.dg[i]==null?"–":"$"+Math.round(v.dg[i]).toLocaleString("en-US");
+  const row=(l,x)=>`<div><b>${l}</b> ${x}</div>`;
+  const tip=document.getElementById("tip");
+  tip.innerHTML=`<div class="th">${when}</div>`
+    +row("%괴리", f(v.pg[i],2)+"%")
+    +row("μ", f(v.muP[i],1)+"%")
+    +row("+1σ / −1σ", f(v.u1[i],1)+"% / "+f(v.l1[i],1)+"%")
+    +row("+3σ", f(v.u3[i],1)+"%")
+    +row("Z", zt)
+    +row("σ", f(v.sd[i],3))
+    +row("달러갭", dgt);
+  tip.style.display="block";
+  const pad=14, tw=tip.offsetWidth, th=tip.offsetHeight;
+  let left=cx+pad, top=cy+pad;
+  if(left+tw>window.innerWidth-6) left=cx-tw-pad;
+  if(top+th>window.innerHeight-6) top=cy-th-pad;
+  tip.style.left=Math.max(4,left)+"px"; tip.style.top=Math.max(4,top)+"px";
+}
+function hideTip(){ const t=document.getElementById("tip"); if(t) t.style.display="none"; }
+
+(function setupHover(){
+  const cv=document.getElementById("chart");
+  if(!cv) return;
+  let raf=null, last=null;
+  function run(){
+    raf=null; if(!last||!CHART) return;
+    const rect=cv.getBoundingClientRect();
+    const mx=last.x-rect.left-(cv.clientLeft||0);
+    let i=Math.round(CHART.s+(mx-40)*(CHART.N-1-CHART.s)/(CHART.W-50));
+    i=Math.max(CHART.s,Math.min(CHART.N-1,i));
+    redrawBase(); drawCross(i); showTip(i,last.x,last.y);
+  }
+  function move(x,y){ last={x,y}; if(!raf) raf=requestAnimationFrame(run); }
+  cv.addEventListener("mousemove",e=>move(e.clientX,e.clientY));
+  cv.addEventListener("mouseleave",()=>{ redrawBase(); hideTip(); });
+  cv.addEventListener("touchmove",e=>{ const t=e.touches[0]; if(t) move(t.clientX,t.clientY); },{passive:true});
+  cv.addEventListener("touchend",()=>{ redrawBase(); hideTip(); });
+})();
 
 load();
 setInterval(load,60000);
