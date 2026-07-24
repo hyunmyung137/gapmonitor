@@ -37,6 +37,8 @@
   td{padding:4px 0;border-bottom:1px solid var(--border)}
   td:last-child{text-align:right;font-variant-numeric:tabular-nums}
   .mini{font-size:11px;color:var(--dim)}
+  .chint{font-size:10px;color:var(--dim);margin:5px 2px 0;display:flex;align-items:center;gap:2px;flex-wrap:wrap}
+  .chint .sw{display:inline-block;width:10px;height:9px;border-radius:2px;margin:0 3px 0 8px}
 </style>
 </head>
 <body>
@@ -53,6 +55,7 @@
 </div>
 
 <canvas id="chart" height="640"></canvas>
+<div class="chint">휠 확대·축소 · 드래그 이동 · 더블클릭 리셋<span class="sw" style="background:rgba(90,167,255,.55)"></span>국장<span class="sw" style="background:rgba(201,160,255,.6)"></span>미장</div>
 
 <div class="card full" style="margin-top:10px">
   <div class="lbl" style="margin-bottom:6px">포지션 / 밴드</div>
@@ -65,7 +68,7 @@ const WIN=96, SIGFLOOR=0.010, ENTRY_Z=1.0, STOP_Z=3.0;
 const BACKSTOP_DGAP=505, ENTRY_DGAP_REF=465;
 const WALLET="0x5cF6e510E0C123E1e839376F8Ea1900Bb9B9A6C1";
 const REENTRY_BASE=147900;
-let CHART=null, LAST=null, ENTRY=null;
+let CHART=null, LAST=null, ENTRY=null, VIEW=null, SESSIONS=null;
 
 async function api(body){
   const r=await fetch("https://api.hyperliquid.xyz/info",{method:"POST",
@@ -134,6 +137,7 @@ async function load(){
     document.getElementById("dgsub").innerHTML=
       `진입 $${ENTRY_DGAP_REF} → <span class="${dgap-ENTRY_DGAP_REF<0?'g':'r'}">${sgn(dgap-ENTRY_DGAP_REF)}</span> · 백스톱 $${BACKSTOP_DGAP} 여유 $${fmt(BACKSTOP_DGAP-dgap)}`;
 
+    SESSIONS=computeSessions(rows);
     drawChart(rows,logs,mu,sd,z);
     await loadPos(px,py,pgap,dgap,curZ,dead,u1,muPct,u3);
 
@@ -191,6 +195,28 @@ async function loadPos(px,py,pgap,dgap,curZ,dead,u1,muPct,u3){
   }
 }
 
+function computeSessions(rows){
+  let etFmt=null;
+  try{ etFmt=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',weekday:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}); }catch(e){}
+  const wd={Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6};
+  return rows.map(r=>{
+    const t=r.t;
+    // 국장: KST(UTC+9, DST 없음) 평일 09:00~15:30
+    const k=new Date(t+9*3600000);
+    const kd=k.getUTCDay(), kmin=k.getUTCHours()*60+k.getUTCMinutes();
+    if(kd>=1&&kd<=5 && kmin>=540 && kmin<=930) return "kr";
+    // 미장: ET(DST 반영) 평일 09:30~16:00
+    if(etFmt){
+      let ed=0,eh=0,em=0;
+      etFmt.formatToParts(t).forEach(p=>{ if(p.type==="weekday")ed=wd[p.value]; else if(p.type==="hour")eh=+p.value; else if(p.type==="minute")em=+p.value; });
+      if(eh===24)eh=0;
+      const emin=eh*60+em;
+      if(ed>=1&&ed<=5 && emin>=570 && emin<=960) return "us";
+    }
+    return null;
+  });
+}
+
 function drawChart(rows,logs,mu,sd,z){
   const cv=document.getElementById("chart");
   const dpr=window.devicePixelRatio||1;
@@ -199,10 +225,21 @@ function drawChart(rows,logs,mu,sd,z){
   const ctx=cv.getContext("2d"); ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,W,H);
 
-  // 워밍업 이후만
+  // 표시 구간 (줌/이동). VIEW 없으면 워밍업 이후 전체
   const s=WIN;
   const N=rows.length;
-  const xAt=i=>40+(W-50)*(i-s)/(N-1-s);
+  let a = VIEW ? Math.max(s, Math.min(VIEW.a, N-2)) : s;
+  let b = VIEW ? Math.max(a+1, Math.min(VIEW.b, N-1)) : N-1;
+  const xAt=i=>40+(W-50)*(i-a)/(b-a);
+
+  // 세션 배경 밴드 (국장=파랑, 미장=보라)
+  if(SESSIONS){
+    for(let i=a;i<b;i++){
+      const ss=SESSIONS[i]; if(!ss) continue;
+      ctx.fillStyle = ss==="kr" ? "rgba(90,167,255,0.06)" : "rgba(201,160,255,0.075)";
+      const x0=xAt(i); ctx.fillRect(x0,0,xAt(i+1)-x0+0.5,H);
+    }
+  }
 
   // 4 패널 높이 배분
   const pads={t:8,b:22};
@@ -213,8 +250,8 @@ function drawChart(rows,logs,mu,sd,z){
 
   function panel(top,h,series,opts){
     const yb=top+pads.t, yh=h-pads.t-pads.b;
-    let lo=Math.min(...series.flatMap(s=>s.data.filter(v=>v!=null)));
-    let hi=Math.max(...series.flatMap(s=>s.data.filter(v=>v!=null)));
+    let lo=Math.min(...series.flatMap(se=>se.data.slice(a,b+1).filter(v=>v!=null)));
+    let hi=Math.max(...series.flatMap(se=>se.data.slice(a,b+1).filter(v=>v!=null)));
     if(opts.lo!=null)lo=Math.min(lo,opts.lo); if(opts.hi!=null)hi=Math.max(hi,opts.hi);
     const pad=(hi-lo)*0.1||1; lo-=pad; hi+=pad;
     const yAt=v=>yb+yh*(1-(v-lo)/(hi-lo));
@@ -231,11 +268,11 @@ function drawChart(rows,logs,mu,sd,z){
     series.forEach(se=>{
       ctx.strokeStyle=se.c; ctx.lineWidth=se.w||1.4; ctx.setLineDash(se.dash||[]);
       ctx.beginPath(); let started=false;
-      for(let i=s;i<N;i++){const v=se.data[i]; if(v==null){started=false;continue;}
+      for(let i=a;i<=b;i++){const v=se.data[i]; if(v==null){started=false;continue;}
         const xx=xAt(i),yy=yAt(v); if(!started){ctx.moveTo(xx,yy);started=true;}else ctx.lineTo(xx,yy);}
       ctx.stroke(); ctx.setLineDash([]);
       // last point dot
-      if(se.dot){const v=se.data[N-1]; if(v!=null){ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(xAt(N-1),yAt(v),3,0,7);ctx.fill();}}
+      if(se.dot){const v=se.data[b]; if(v!=null){ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(xAt(b),yAt(v),3,0,7);ctx.fill();}}
     });
     return yAt;
   }
@@ -276,7 +313,7 @@ function drawChart(rows,logs,mu,sd,z){
 
   // hover 지원용 지오메트리/데이터 저장
   LAST={rows,logs,mu,sd,z};
-  CHART={rows,s,N,W,H,ctx,xAt,
+  CHART={rows,s,a,b,N,W,H,ctx,xAt,
     panels:[
       {yAt:yAt1,dots:[{d:pg,c:colors.gold},{d:muP,c:colors.blue},{d:u1,c:colors.red},{d:l1,c:colors.green},{d:u3,c:colors.red}]},
       {yAt:yAt2,dots:[{d:z,c:colors.purple}]},
@@ -330,23 +367,68 @@ function showTip(i,cx,cy){
 }
 function hideTip(){ const t=document.getElementById("tip"); if(t) t.style.display="none"; }
 
-(function setupHover(){
+(function setup(){
   const cv=document.getElementById("chart");
   if(!cv) return;
-  let raf=null, last=null;
-  function run(){
-    raf=null; if(!last||!CHART) return;
-    const rect=cv.getBoundingClientRect();
-    const mx=last.x-rect.left-(cv.clientLeft||0);
-    let i=Math.round(CHART.s+(mx-40)*(CHART.N-1-CHART.s)/(CHART.W-50));
-    i=Math.max(CHART.s,Math.min(CHART.N-1,i));
-    redrawBase(); drawCross(i); showTip(i,last.x,last.y);
+  let raf=null, last=null, drag=null, touch=null;
+  function clampView(a,b){
+    const N=CHART.N; let sp=Math.max(20, Math.min(N-1-WIN, b-a));
+    a=Math.round(a); if(a<WIN)a=WIN; b=a+sp; if(b>N-1){ b=N-1; a=b-sp; } if(a<WIN)a=WIN;
+    return {a,b};
   }
-  function move(x,y){ last={x,y}; if(!raf) raf=requestAnimationFrame(run); }
-  cv.addEventListener("mousemove",e=>move(e.clientX,e.clientY));
-  cv.addEventListener("mouseleave",()=>{ redrawBase(); hideTip(); });
-  cv.addEventListener("touchmove",e=>{ const t=e.touches[0]; if(t) move(t.clientX,t.clientY); },{passive:true});
-  cv.addEventListener("touchend",()=>{ redrawBase(); hideTip(); });
+  function idxAt(clientX){
+    const rect=cv.getBoundingClientRect();
+    const mx=clientX-rect.left-(cv.clientLeft||0);
+    const a=CHART.a,b=CHART.b;
+    return Math.max(a,Math.min(b,Math.round(a+(mx-40)*(b-a)/(CHART.W-50))));
+  }
+  function run(){ raf=null; if(!last||!CHART) return; const i=idxAt(last.x); redrawBase(); drawCross(i); showTip(i,last.x,last.y); }
+  function hover(x,y){ last={x,y}; if(!raf) raf=requestAnimationFrame(run); }
+
+  cv.addEventListener("mousemove",e=>{
+    if(!CHART) return;
+    if(drag){
+      const per=(drag.b-drag.a)/(CHART.W-50);
+      const sh=Math.round((drag.x-e.clientX)*per);
+      VIEW=clampView(drag.a+sh, drag.b+sh); redrawBase(); hideTip(); return;
+    }
+    hover(e.clientX,e.clientY);
+  });
+  cv.addEventListener("mousedown",e=>{ if(!CHART)return; drag={x:e.clientX,a:CHART.a,b:CHART.b}; cv.style.cursor="grabbing"; hideTip(); e.preventDefault(); });
+  window.addEventListener("mouseup",()=>{ if(drag){ drag=null; cv.style.cursor="crosshair"; } });
+  cv.addEventListener("mouseleave",()=>{ if(!drag){ redrawBase(); hideTip(); } });
+
+  cv.addEventListener("wheel",e=>{
+    if(!CHART)return; e.preventDefault();
+    const a=CHART.a,b=CHART.b,sp=b-a,ci=idxAt(e.clientX);
+    const ns=Math.round(sp*(e.deltaY<0?0.8:1.25));
+    const frac=sp?(ci-a)/sp:0.5, na=Math.round(ci-frac*ns);
+    VIEW=clampView(na, na+ns); redrawBase(); hideTip();
+  },{passive:false});
+
+  cv.addEventListener("dblclick",()=>{ VIEW=null; redrawBase(); hideTip(); });
+
+  cv.addEventListener("touchstart",e=>{
+    if(!CHART)return;
+    if(e.touches.length===1){ touch={mode:"pan",x:e.touches[0].clientX,a:CHART.a,b:CHART.b}; hideTip(); }
+    else if(e.touches.length===2){ touch={mode:"pinch",d:Math.abs(e.touches[0].clientX-e.touches[1].clientX)||1,cx:(e.touches[0].clientX+e.touches[1].clientX)/2,a:CHART.a,b:CHART.b}; }
+  },{passive:true});
+  cv.addEventListener("touchmove",e=>{
+    if(!CHART||!touch)return;
+    if(touch.mode==="pan"&&e.touches.length===1){
+      const per=(touch.b-touch.a)/(CHART.W-50);
+      const sh=Math.round((touch.x-e.touches[0].clientX)*per);
+      VIEW=clampView(touch.a+sh, touch.b+sh); redrawBase(); hideTip();
+    } else if(touch.mode==="pinch"&&e.touches.length===2){
+      const nd=Math.abs(e.touches[0].clientX-e.touches[1].clientX)||1, sp=touch.b-touch.a;
+      const ns=Math.round(sp*(touch.d/nd));
+      const rect=cv.getBoundingClientRect(), mx=touch.cx-rect.left-(cv.clientLeft||0);
+      const ci=Math.max(touch.a,Math.min(touch.b,Math.round(touch.a+(mx-40)*sp/(CHART.W-50))));
+      const frac=sp?(ci-touch.a)/sp:0.5, na=Math.round(ci-frac*ns);
+      VIEW=clampView(na, na+ns); redrawBase(); hideTip();
+    }
+  },{passive:true});
+  cv.addEventListener("touchend",e=>{ if(e.touches.length===0) touch=null; });
 })();
 
 load();
