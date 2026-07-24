@@ -65,7 +65,7 @@ const WIN=96, SIGFLOOR=0.010, ENTRY_Z=1.0, STOP_Z=3.0;
 const BACKSTOP_DGAP=505, ENTRY_DGAP_REF=465;
 const WALLET="0x5cF6e510E0C123E1e839376F8Ea1900Bb9B9A6C1";
 const REENTRY_BASE=147900;
-let CHART=null, LAST=null;
+let CHART=null, LAST=null, ENTRY=null;
 
 async function api(body){
   const r=await fetch("https://api.hyperliquid.xyz/info",{method:"POST",
@@ -162,10 +162,18 @@ async function loadPos(px,py,pgap,dgap,curZ,dead,u1,muPct,u3){
       const qx=Math.abs(parseFloat(X.szi)), qy=Math.abs(parseFloat(Y.szi));
       const upnl=parseFloat(X.unrealizedPnl)+parseFloat(Y.unrealizedPnl);
       const ratio=qy/qx;
+      const exPx=parseFloat(X.entryPx), eyPx=parseFloat(Y.entryPx);
+      ENTRY=(exPx>0&&eyPx>0)?{gap:(10*eyPx-exPx)/exPx*100, dgap:10*eyPx-exPx, upnl}:null;
       rows_html+=`<tr><td>SKHX 롱 / SKHY 숏</td><td class="pos">${qx.toFixed(1)} / ${qy.toFixed(0)}주 ${Math.abs(ratio-10)<0.3?'<span class="g">✓1:10</span>':'<span class="r">⚠비율</span>'}</td></tr>`;
       rows_html+=`<tr><td>미실현</td><td class="pos ${upnl>=0?'g':'r'}">${sgn(upnl)}</td></tr>`;
+      if(ENTRY){
+        const nowGap=(10*py-px)/px*100, dGap=pgap-ENTRY.gap;
+        rows_html+=`<tr><td>내 진입 %괴리 / 달러갭</td><td class="pos"><span style="color:#ff8fa3">${ENTRY.gap.toFixed(2)}%</span> / $${Math.round(ENTRY.dgap).toLocaleString("en-US")}</td></tr>`;
+        rows_html+=`<tr><td class="d">현재 − 진입 (괴리차)</td><td class="pos ${dGap>=0?'r':'g'}">${sgn(dGap,2)}%p</td></tr>`;
+      }
       rows_html+=`<tr><td class="d">현재 보유 / 바닥</td><td class="pos d">${qx.toFixed(0)}주 / 140주</td></tr>`;
     } else {
+      ENTRY=null;
       rows_html+=`<tr><td class="d">포지션</td><td class="pos d">없음 (플랫)</td></tr>`;
     }
     // 재진입 트리거
@@ -177,6 +185,7 @@ async function loadPos(px,py,pgap,dgap,curZ,dead,u1,muPct,u3){
     rows_html+=`<tr><td class="d">총자산(perp+spot)</td><td class="pos d">$${fmt(perpAcct)} + $${fmt(spotUsdc)} <span class="mini">(통합계좌: 단순합산 주의)</span></td></tr>`;
     rows_html+=`<tr><td class="d">밴드 μ / +1σ / +3σ</td><td class="pos d">${muPct.toFixed(1)}% / ${u1.toFixed(1)}% / ${u3.toFixed(1)}%</td></tr>`;
     tb.innerHTML=rows_html;
+    redrawBase(); // 진입선 반영해 차트 다시 그림
   }catch(e){
     tb.innerHTML=`<tr><td class="d">포지션 로드 실패</td><td class="pos r">${e.message}</td></tr>`;
   }
@@ -243,7 +252,8 @@ function drawChart(rows,logs,mu,sd,z){
     {data:u1,c:colors.red,w:0.9,dash:[4,3]},
     {data:l1,c:colors.green,w:0.9,dash:[4,3]},
     {data:u3,c:colors.red,w:0.7,dash:[2,3]},
-  ],{fmt:v=>v.toFixed(0)+"%"});
+  ],{fmt:v=>v.toFixed(0)+"%", lo:ENTRY?ENTRY.gap:null, hi:ENTRY?ENTRY.gap:null,
+     hlines:ENTRY?[{v:ENTRY.gap,c:"#ff8fa3",w:1.2,dash:[6,4],label:"내 진입 "+ENTRY.gap.toFixed(2)+"%"}]:[]});
   ctx.fillStyle=colors.dim;ctx.font="10px sans-serif";ctx.fillText("%괴리 + 밴드",44,tops[0]+12);
 
   // 패널2: Z
@@ -260,7 +270,8 @@ function drawChart(rows,logs,mu,sd,z){
   // 패널4: 달러갭
   const dg=rows.map(r=>10*r.y-r.x);
   const yAt4=panel(tops[3],heights[3],[{data:dg,c:colors.gold,w:1.4,dot:true}],
-    {hi:BACKSTOP_DGAP,fmt:v=>"$"+v.toFixed(0),hlines:[{v:BACKSTOP_DGAP,c:colors.red,w:1,label:"백스톱 $505"}]});
+    {hi:BACKSTOP_DGAP,lo:ENTRY?ENTRY.dgap:null,fmt:v=>"$"+v.toFixed(0),
+     hlines:[{v:BACKSTOP_DGAP,c:colors.red,w:1,label:"백스톱 $505"}].concat(ENTRY?[{v:ENTRY.dgap,c:"#ff8fa3",w:1.2,dash:[6,4],label:"내 진입 $"+Math.round(ENTRY.dgap)}]:[])});
   ctx.fillStyle=colors.dim;ctx.font="10px sans-serif";ctx.fillText("달러갭",44,tops[3]+12);
 
   // hover 지원용 지오메트리/데이터 저장
